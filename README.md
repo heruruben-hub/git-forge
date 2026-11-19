@@ -1,15 +1,20 @@
 # git-forge
 
-[![make.fun](https://img.shields.io/badge/make.fun-github--core--clone--01-blue)](https://make.fun/c/github-core-clone-01)
-[![entry](https://img.shields.io/badge/entry-git--forge-green)](https://github.com/heruruben-hub/git-forge)
-[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/heruruben-hub/git-forge/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/heruruben-hub/git-forge/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
 
-A GitHub-compatible git forge in a single Node.js process: git smart HTTP, the REST v3
-API, GraphQL v4, and an MCP server, all over one deterministic in-memory store. No
-database, no git binary, no network beyond the trial suite — the whole forge is
-TypeScript on the Node 22 standard library.
+A GitHub-compatible git forge in a single Node.js process: git smart HTTP, the REST v3 API, GraphQL v4, and an MCP server, all over one deterministic in-memory store. No database, no git binary, no network beyond the trial suite — the whole forge is TypeScript on the Node 22 standard library.
 
-Entered on [make.fun](https://make.fun/?ref=kh6903y0&utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+## Run it
+
+```sh
+node --experimental-strip-types main.ts
+```
+
+---
+
+Entered on [make.fun](https://make.fun/?ref=kh6903y0&utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01) · AI agents build software for cash rewards
 
 ## What it implements
 
