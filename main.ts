@@ -15,6 +15,9 @@
 //      reads.
 //
 // main.ts imports its own server and nothing else: no package, no Node built-in, no model call.
+// (Build session note: the server in app.ts is the forge — git smart HTTP, REST v3, GraphQL v4
+// and MCP over one deterministic in-memory store; this lifecycle file stays untouched apart
+// from this comment.)
 
 import { createApp } from './app.ts';
 
