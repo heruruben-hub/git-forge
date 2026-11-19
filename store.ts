@@ -221,7 +221,9 @@ export interface CommitView {
 export function parseCommit(data: Buffer): CommitView {
   const blank = data.indexOf('\n\n');
   const headerEnd = blank < 0 ? data.length : blank;
-  const message = blank < 0 ? '' : data.subarray(blank + 2).toString('utf8');
+  // The message is the body after the blank line, with the trailing newline git appends
+  // stripped: that is the message the API reports (and what an exact comparison expects).
+  const message = blank < 0 ? '' : data.subarray(blank + 2).toString('utf8').replace(/\n+$/, '');
   let tree = '';
   const parents: string[] = [];
   let author = '';
