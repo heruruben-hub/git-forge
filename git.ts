@@ -22,6 +22,7 @@ import { deflateSync, inflateSync as zlibInflateSync } from 'node:zlib';
 import {
   collectReachable,
   hashObject,
+  isAncestor,
   isObjectId,
   parseCommit,
   parseTag,
@@ -404,6 +405,8 @@ export interface FetchArgs {
   haves: string[];
   shallow: string[];
   depth: number | null;
+  /** `deepen-relative`: the depth counts generations below the shallow boundary, not from the want. */
+  deepenRelative?: boolean;
 }
 
 /**
@@ -441,6 +444,21 @@ export function selectFetchObjects(repo: Repo, args: FetchArgs): { objects: Arra
   const wantSet = new Set<string>();
   const boundary = new Set<string>();
   const commitDepth = new Map<string, number>();
+  // With deepen-relative, the depth counts generations below the shallow boundary (0 is the
+  // boundary itself); commits above the boundary are new history and always included.
+  const relative = args.deepenRelative === true && args.depth !== null && args.shallow.length > 0;
+  const belowDepth = new Map<string, number>();
+  if (relative) {
+    const queue: Array<[string, number]> = args.shallow.map((oid) => [oid, 0] as [string, number]);
+    while (queue.length > 0) {
+      const [oid, depth] = queue.shift() as [string, number];
+      if (belowDepth.has(oid)) continue;
+      const object = repo.objects.get(oid);
+      if (object === undefined || object.type !== 'commit') continue;
+      belowDepth.set(oid, depth);
+      for (const parent of parseCommit(object.data).parents) queue.push([parent, depth + 1]);
+    }
+  }
   const queue: string[] = [];
   for (const want of args.wants) {
     const object = repo.objects.get(want);
@@ -472,15 +490,24 @@ export function selectFetchObjects(repo: Repo, args: FetchArgs): { objects: Arra
       const depth = commitDepth.get(oid) ?? 0;
       const commit = parseCommit(object.data);
       queue.push(commit.tree);
-      const withinDepth = args.depth === null || depth + 1 < args.depth;
-      if (args.depth !== null && !withinDepth) boundary.add(oid);
+      let withinDepth = args.depth === null || depth + 1 < args.depth;
+      if (relative) {
+        // Below the boundary the cut is at `depth` generations under it; above it
+        // everything is new history and is included.
+        const below = belowDepth.get(oid);
+        withinDepth = below === undefined || below < (args.depth as number);
+        if (below !== undefined && below === args.depth) boundary.add(oid);
+        if (below === undefined && commit.parents.length === 0) boundary.add(oid);
+      } else {
+        if (args.depth !== null && !withinDepth) boundary.add(oid);
+        if (args.depth !== null && commit.parents.length === 0) boundary.add(oid);
+      }
       for (const parent of commit.parents) {
         if (withinDepth) {
           if (!commitDepth.has(parent)) commitDepth.set(parent, depth + 1);
           queue.push(parent);
         }
       }
-      if (args.depth !== null && commit.parents.length === 0) boundary.add(oid);
     } else if (object.type === 'tag') {
       queue.push(parseTag(object.data).object);
     } else if (object.type === 'tree') {
@@ -506,7 +533,7 @@ export function selectFetchObjects(repo: Repo, args: FetchArgs): { objects: Arra
   return { objects, shallow: [...boundary].sort(), unshallow: unshallow.sort() };
 }
 
-/** The packfile section of a v2 fetch: section name, sideband pack packets, flush. */
+/** The packfile section of a v2 fetch: section name, sideband pack packets. The caller ends the response with a flush. */
 export function packfileSection(pack: Buffer): Buffer {
   const chunks: Buffer[] = [pktLine('packfile\n')];
   let offset = 0;
@@ -516,7 +543,6 @@ export function packfileSection(pack: Buffer): Buffer {
     offset += slice.length;
   }
   if (pack.length === 0) chunks.push(pktLine(Buffer.from([1])));
-  chunks.push(pktFlush());
   return Buffer.concat(chunks);
 }
 
@@ -530,7 +556,10 @@ export interface GitResponse {
   body: Buffer;
 }
 
-const GIT_CONTENT_TYPE = 'application/x-git-upload-pack-advertisement';
+const GIT_UPLOAD_ADVERTISEMENT = 'application/x-git-upload-pack-advertisement';
+const GIT_RECEIVE_ADVERTISEMENT = 'application/x-git-receive-pack-advertisement';
+const GIT_UPLOAD_RESULT = 'application/x-git-upload-pack-result';
+const GIT_RECEIVE_RESULT = 'application/x-git-receive-pack-result';
 
 function lsRefsLines(repo: Repo, args: { peel: boolean; symrefs: boolean; unborn: boolean; refPrefix: string[] }): PktItem[] {
   const lines: PktItem[] = [];
@@ -595,7 +624,7 @@ export function handleUploadPack(repo: Repo, body: Buffer, isV2: boolean): GitRe
         unborn: args.has('unborn'),
         refPrefix: args.get('ref-prefix') ?? [],
       });
-      return { status: 200, contentType: GIT_CONTENT_TYPE, body: encodePktLines(lines) };
+      return { status: 200, contentType: GIT_UPLOAD_RESULT, body: encodePktLines(lines) };
     }
     if (command === 'fetch') {
       const wants = args.get('want') ?? [];
@@ -607,18 +636,37 @@ export function handleUploadPack(repo: Repo, body: Buffer, isV2: boolean): GitRe
         haves,
         shallow,
         depth: Number.isFinite(depth) && depth !== null && depth > 0 ? depth : null,
+        deepenRelative: args.has('deepen-relative'),
       });
-      const parts: Buffer[] = [encodePktLines(['acknowledgments\n', 'NAK\n', 'flush'])];
+      // Sections are delim-separated and the response ends with a flush. The acknowledgments
+      // section only exists when the client sent haves: a fresh clone sends none, and git
+      // expects the packfile section first then. Haves the store holds are ACKed; with none
+      // held, the section carries a NAK.
+      const parts: Buffer[] = [];
+      if (haves.length > 0) {
+        const ackLines: PktItem[] = ['acknowledgments\n'];
+        let acknowledged = 0;
+        for (const have of haves) {
+          if (repo.objects.has(have)) {
+            ackLines.push(`ACK ${have}\n`);
+            acknowledged += 1;
+          }
+        }
+        if (acknowledged === 0) ackLines.push('NAK\n');
+        else ackLines.push('ready\n');
+        ackLines.push('delim');
+        parts.push(encodePktLines(ackLines));
+      }
       if (newShallow.length > 0 || unshallow.length > 0) {
         const lines: PktItem[] = ['shallow-info\n'];
         for (const oid of newShallow) lines.push(`shallow ${oid}\n`);
         for (const oid of unshallow) lines.push(`unshallow ${oid}\n`);
-        lines.push('flush');
+        lines.push('delim');
         parts.push(encodePktLines(lines));
       }
       parts.push(packfileSection(writePack(objects)));
       parts.push(pktFlush());
-      return { status: 200, contentType: GIT_CONTENT_TYPE, body: Buffer.concat(parts) };
+      return { status: 200, contentType: GIT_UPLOAD_RESULT, body: Buffer.concat(parts) };
     }
     return { status: 400, contentType: 'application/json', body: Buffer.from(JSON.stringify({ message: `unknown v2 command ${command}` }), 'utf8') };
   }
@@ -627,6 +675,7 @@ export function handleUploadPack(repo: Repo, body: Buffer, isV2: boolean): GitRe
   const v0Haves: string[] = [];
   const shallow: string[] = [];
   let depth: number | null = null;
+  let deepenRelative = false;
   let section = 0;
   for (const packet of packets) {
     if (packet.kind === 'flush') {
@@ -641,24 +690,26 @@ export function handleUploadPack(repo: Repo, body: Buffer, isV2: boolean): GitRe
     if (line.startsWith('want ')) wants.push(value.split(' ')[0] as string);
     else if (line.startsWith('have ')) v0Haves.push(value.split(' ')[0] as string);
     else if (line.startsWith('shallow ')) shallow.push(value);
+    else if (line === 'deepen-relative') deepenRelative = true;
     else if (line.startsWith('deepen ')) {
       const parsed = Number.parseInt(value, 10);
       if (Number.isFinite(parsed) && parsed > 0) depth = parsed;
     }
   }
-  const { objects, shallow: newShallow, unshallow } = selectFetchObjects(repo, { wants, haves: v0Haves, shallow, depth });
+  const { objects, shallow: newShallow, unshallow } = selectFetchObjects(repo, { wants, haves: v0Haves, shallow, depth, deepenRelative });
   const parts: Buffer[] = [];
   if (newShallow.length > 0 || unshallow.length > 0) {
+    // Shallow lines come first as plain pkt-lines, then the NAK, then the sideband pack;
+    // no flush separates them in v0.
     const lines: PktItem[] = [];
     for (const oid of newShallow) lines.push(`shallow ${oid}\n`);
     for (const oid of unshallow) lines.push(`unshallow ${oid}\n`);
-    lines.push('flush');
     parts.push(encodePktLines(lines));
   }
   parts.push(pktLine('NAK\n'));
   parts.push(sideband(writePack(objects)));
   parts.push(pktFlush());
-  return { status: 200, contentType: GIT_CONTENT_TYPE, body: Buffer.concat(parts) };
+  return { status: 200, contentType: GIT_UPLOAD_RESULT, body: Buffer.concat(parts) };
 }
 
 interface PushCommand {
@@ -741,15 +792,16 @@ export function handleReceivePack(repo: Repo, body: Buffer): GitResponse {
   }
   // The report-status stream is pkt-framed inside sideband band 1, per the git protocol.
   const report = encodePktLines([...reportLines, 'flush']);
-  return { status: 200, contentType: GIT_CONTENT_TYPE, body: Buffer.concat([sideband(report), pktFlush()]) };
+  return { status: 200, contentType: GIT_RECEIVE_RESULT, body: Buffer.concat([sideband(report), pktFlush()]) };
 }
 
 /** A v0 ref advertisement for the given service, or null when the repo has no refs at all. */
 export function handleAdvertise(repo: Repo, service: 'git-upload-pack' | 'git-receive-pack', isV2: boolean): GitResponse {
+  const contentType = service === 'git-upload-pack' ? GIT_UPLOAD_ADVERTISEMENT : GIT_RECEIVE_ADVERTISEMENT;
   if (isV2 && service === 'git-upload-pack') {
-    return { status: 200, contentType: GIT_CONTENT_TYPE, body: advertiseV2() };
+    return { status: 200, contentType, body: advertiseV2() };
   }
-  return { status: 200, contentType: GIT_CONTENT_TYPE, body: advertiseV0(repo, service) };
+  return { status: 200, contentType, body: advertiseV0(repo, service) };
 }
 
 // A re-export for the rest layer, which answers git paths through the same router.

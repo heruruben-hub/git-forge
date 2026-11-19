@@ -30,6 +30,7 @@ import {
   buildTreeFromPaths,
   commitContents,
   flattenTree,
+  isObjectId,
   mergeBase,
   parseCommit,
   parseTree,
