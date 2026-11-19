@@ -26,6 +26,7 @@
 //     404 JSON. The bearer token is MAKEFUN_SHOP_TOKEN; without it, 401.
 
 import {
+  ancestorsOf,
   buildCommit,
   buildTreeFromPaths,
   commitContents,

@@ -59,20 +59,13 @@ function isAuthorized(req: IncomingMessage): boolean {
   return token === EXPECTED_TOKEN;
 }
 
-/** The path of a request URL, or '/' when it does not parse (never a throw from a request). */
-function pathOf(req: IncomingMessage): string {
+/** The path and query of a request URL, parsed once (never a throw from a request). */
+function urlParts(req: IncomingMessage): { path: string; query: URLSearchParams } {
   try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
+    const url = new URL(req.url ?? '/', 'http://entry');
+    return { path: url.pathname, query: url.searchParams };
   } catch {
-    return '/';
-  }
-}
-
-function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
+    return { path: '/', query: new URLSearchParams() };
   }
 }
 
@@ -139,10 +132,13 @@ export function createApp(): Server {
     void (async () => {
       requestCounter += 1;
       const requestId = `req-${requestCounter}`;
-      const path = pathOf(req);
+      const { path, query } = urlParts(req);
       const method = req.method ?? 'GET';
-      const query = queryOf(req);
       const baseUrl = baseUrlOf(req);
+
+      // GET requests never carry a body in this API: answer without waiting for the stream.
+      const needsBody = method !== 'GET' && method !== 'HEAD';
+      const readBodyIfNeeded = async (): Promise<Buffer | null> => (needsBody ? readBody(req) : null);
 
       // The env's boot check calls this twice: 200 {"ok":true}. No auth.
       if (method === 'GET' && path === '/healthz') {
@@ -160,7 +156,7 @@ export function createApp(): Server {
         }
         let body: Buffer | null = null;
         try {
-          body = await readBody(req);
+          body = await readBodyIfNeeded();
         } catch {
           sendJson(res, requestId, 413, { message: 'Request body is too large' });
           return;
@@ -182,7 +178,7 @@ export function createApp(): Server {
         }
         let body: Buffer | null = null;
         try {
-          body = await readBody(req);
+          body = await readBodyIfNeeded();
         } catch {
           sendJson(res, requestId, 413, { message: 'Request body is too large' });
           return;
@@ -204,7 +200,7 @@ export function createApp(): Server {
         }
         let body: Buffer | null = null;
         try {
-          body = await readBody(req);
+          body = await readBodyIfNeeded();
         } catch {
           sendJson(res, requestId, 413, { message: 'Request body is too large' });
           return;
@@ -250,7 +246,7 @@ export function createApp(): Server {
         }
         let body: Buffer | null = null;
         try {
-          body = await readBody(req);
+          body = await readBodyIfNeeded();
         } catch {
           sendJson(res, requestId, 413, { message: 'Request body is too large' });
           return;
